@@ -51,8 +51,13 @@ Recommande une première action facile à tester pendant une semaine. Explique c
 function regenerate(){output.value=makePrompt(Object.fromEntries(new FormData(form)));status.textContent='Prompt actualisé. Relisez-le, puis copiez-le dans l’IA de votre choix.';}
 form.addEventListener('input',regenerate);form.addEventListener('change',regenerate);form.addEventListener('submit',event=>event.preventDefault());form.addEventListener('reset',()=>setTimeout(regenerate,0));
 document.querySelector('#copy').addEventListener('click',async()=>{
- try{await navigator.clipboard.writeText(output.value);status.textContent='Prompt complet copié. Ouvrez votre IA ci-dessous, puis collez-le dans une nouvelle conversation.';}
- catch{output.focus();output.select();status.textContent='Le texte est sélectionné. Utilisez Copier sur votre appareil, puis collez-le dans votre IA.';}
+ const success='Prompt complet copié. Ouvrez votre IA ci-dessous, puis collez-le dans une nouvelle conversation.';
+ const manual='Le texte est sélectionné. Utilisez Copier sur votre appareil, puis collez-le dans votre IA.';
+ output.focus({preventScroll:true});output.select();
+ try{if(document.execCommand('copy')){status.textContent=success;return;}}catch{}
+ status.textContent=manual;
+ try{await Promise.race([navigator.clipboard.writeText(output.value),new Promise((_,reject)=>setTimeout(()=>reject(new Error('Clipboard timeout')),1200))]);status.textContent=success;}
+ catch{status.textContent=manual;}
 });
 document.querySelector('#download').addEventListener('click',()=>{const url=URL.createObjectURL(new Blob([output.value],{type:'text/plain;charset=utf-8'}));const link=document.createElement('a');link.href=url;link.download='mon-trajet-ibgbi-prompt.txt';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);status.textContent='Le téléchargement du prompt au format texte est lancé.';});
 regenerate();
