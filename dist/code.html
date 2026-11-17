@@ -1,0 +1,233 @@
+<!doctype html><html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Le moteur Python — IBGBI</title><link rel="stylesheet" href="style.css"></head><body><main class="code-page"><a class="button secondary" href="./#code">← Retour au compagnon</a><p class="eyebrow">LE CODE DU CALCULATEUR</p><h1>Lire le moteur Python.</h1><p>Fichier <code>python/src/model.py</code>, reproduit à l’identique depuis le projet du poster. Consultez les données, les tests et les résultats sur <a href="https://github.com/ibrallah/mobilite-ibgbi">GitHub</a>, ou <a href="downloads/projet-python.zip" download>téléchargez le projet</a>.</p><p>Le code utilise uniquement la bibliothèque standard Python. Le calculateur ne tourne pas sur cette page statique.</p><pre><code>&quot;&quot;&quot;Auditable bounded multimodal router. Standard library only.
+
+Labels are compared on time, boarding readiness, carbon, walking and boardings.
+Each transit expansion rides an entire scheduled trip to every permitted alighting
+stop, so continuing on one vehicle never incurs a fictitious transfer.
+&quot;&quot;&quot;
+from __future__ import annotations
+from pathlib import Path
+from dataclasses import dataclass
+from collections import defaultdict
+from datetime import date, timedelta
+import gzip, json, math, bisect, heapq, time
+
+ROOT=Path(__file__).resolve().parents[1]
+
+def hav(a,b):
+    x,y,u,v=map(math.radians,[a[0],a[1],b[0],b[1]])
+    return 6371000*2*math.asin(min(1,math.sqrt(math.sin((u-x)/2)**2+math.cos(x)*math.cos(u)*math.sin((v-y)/2)**2)))
+
+def seconds(t):
+    h,m,s=map(int,t.split(&#x27;:&#x27;));return h*3600+m*60+s
+
+def clock(t):
+    day=int(t)//86400;t=int(t)%86400
+    return f&#x27;{t//3600:02}:{t%3600//60:02}&#x27;+(f&#x27; (+{day}j)&#x27; if day else &#x27;&#x27;)
+
+def active_services(calendar,exceptions,day):
+    d=date.fromisoformat(day);key=d.strftime(&#x27;%Y%m%d&#x27;);wd=[&#x27;monday&#x27;,&#x27;tuesday&#x27;,&#x27;wednesday&#x27;,&#x27;thursday&#x27;,&#x27;friday&#x27;,&#x27;saturday&#x27;,&#x27;sunday&#x27;][d.weekday()]
+    active={r[&#x27;service_id&#x27;] for r in calendar if r[&#x27;start_date&#x27;]&lt;=key&lt;=r[&#x27;end_date&#x27;] and r.get(wd)==&#x27;1&#x27;}
+    for r in exceptions:
+        if r[&#x27;date&#x27;]==key:
+            if r[&#x27;exception_type&#x27;]==&#x27;1&#x27;:active.add(r[&#x27;service_id&#x27;])
+            elif r[&#x27;exception_type&#x27;]==&#x27;2&#x27;:active.discard(r[&#x27;service_id&#x27;])
+    return active
+
+@dataclass(eq=False,slots=True)
+class Label:
+    stop:str; t:int; ready:int; g:float; walk:int; boards:int; pmr:int; path:tuple
+    alive:bool=True
+
+def dominates(a,b):
+    # Status differences are not numerically ranked. Both remain visible.
+    return a.pmr==b.pmr and a.t&lt;=b.t and a.ready&lt;=b.ready and a.g&lt;=b.g+1e-7 and a.walk&lt;=b.walk and a.boards&lt;=b.boards
+
+class Network:
+    def __init__(self,path=None,data=None):
+        if data is None:
+            with gzip.open(path or ROOT/&#x27;data&#x27;/&#x27;network.json.gz&#x27;,&#x27;rt&#x27;,encoding=&#x27;utf-8&#x27;) as f:data=json.load(f)
+        self.data=data;self.stops=data[&#x27;stops&#x27;];self.routes=data[&#x27;routes&#x27;];self.trips=data[&#x27;trips&#x27;];self.calls={};self.coords={}
+        for sid,s in self.stops.items():self.coords[sid]=(float(s[&#x27;stop_lat&#x27;]),float(s[&#x27;stop_lon&#x27;]))
+        for tid,seq in data[&#x27;calls&#x27;].items():
+            if len(seq)&lt;2 or any(not c[1] or not c[2] for c in seq):continue
+            out=[(c[0],seconds(c[1]),seconds(c[2]),c[4] in (&#x27;&#x27;,&#x27;0&#x27;),c[5] in (&#x27;&#x27;,&#x27;0&#x27;)) for c in seq]
+            if any(out[i][1]&lt;out[i-1][2] for i in range(1,len(out))) or any(c[2]&lt;c[1] for c in out):continue
+            self.calls[tid]=out
+        self.used={c[0] for seq in self.calls.values() for c in seq}
+        self.children=defaultdict(list)
+        for s in self.used:
+            p=self.stops[s].get(&#x27;parent_station&#x27;)
+            if p:self.children[p].append(s)
+        self.transfers=defaultdict(list);self.forbidden=set();self.raw_transfer={}
+        for r in data.get(&#x27;transfers&#x27;,[]):
+            aa=[r[&#x27;from_stop_id&#x27;]] if r[&#x27;from_stop_id&#x27;] in self.used else self.children.get(r[&#x27;from_stop_id&#x27;],[])
+            bb=[r[&#x27;to_stop_id&#x27;]] if r[&#x27;to_stop_id&#x27;] in self.used else self.children.get(r[&#x27;to_stop_id&#x27;],[])
+            for a in aa:
+                for b in bb:
+                    self.raw_transfer[a,b]=r
+                    if r[&#x27;transfer_type&#x27;]==&#x27;3&#x27;:self.forbidden.add((a,b));continue
+                    if a==b:continue
+                    walk=max(1,math.ceil(hav(self.coords[a],self.coords[b])*1.25/1.25))
+                    duration=max(walk,int(r.get(&#x27;min_transfer_time&#x27;) or 0),30)
+                    self.transfers[a].append((b,duration,walk,&#x27;GTFS transfers + marche estimée&#x27;))
+        # Only official declared transfer edges; no invented cross-station links.
+        self._days={};self._distances={};self.distance_quality=defaultdict(int)
+        self.campus=(data[&#x27;campus&#x27;][&#x27;lat&#x27;],data[&#x27;campus&#x27;][&#x27;lon&#x27;])
+        self.egress={s:math.ceil(hav(self.coords[s],self.campus)*1.25/1.25) for s in self.used if hav(self.coords[s],self.campus)&lt;=1500}
+
+    def pmr_stop(self,sid):
+        visited=set()
+        while sid and sid not in visited:
+            visited.add(sid);s=self.stops.get(sid,{})
+            v=s.get(&#x27;wheelchair_boarding&#x27;,&#x27;&#x27;)
+            if v in (&#x27;1&#x27;,&#x27;2&#x27;):return int(v)
+            sid=s.get(&#x27;parent_station&#x27;)
+        return 0
+
+    def day(self,day):
+        if day in self._days:return self._days[day]
+        active=active_services(self.data[&#x27;calendar&#x27;],self.data[&#x27;calendar_dates&#x27;],day)
+        prev=active_services(self.data[&#x27;calendar&#x27;],self.data[&#x27;calendar_dates&#x27;],(date.fromisoformat(day)-timedelta(days=1)).isoformat())
+        departures=defaultdict(list)
+        for tid,seq in self.calls.items():
+            service=self.trips[tid][&#x27;service_id&#x27;]
+            for offset in ([0] if service in active else [])+([-86400] if service in prev and seq[-1][1]&gt;=86400 else []):
+                for i,c in enumerate(seq[:-1]):
+                    if c[3] and c[2]+offset&gt;=0:departures[c[0]].append((c[2]+offset,tid,i,offset))
+        for seq in departures.values():seq.sort()
+        self._days[day]=departures;return departures
+
+    def distances(self,tid):
+        trip=self.trips[tid];seq=self.calls[tid];key=(trip.get(&#x27;shape_id&#x27;,&#x27;&#x27;),tuple(c[0] for c in seq))
+        if key in self._distances:return self._distances[key]
+        shape=self.data.get(&#x27;shapes&#x27;,{}).get(trip.get(&#x27;shape_id&#x27;,&#x27;&#x27;),[])
+        coords=[self.coords[c[0]] for c in seq]
+        cumulative=None;method=&#x27;cordes inter-arrêts × 1,20&#x27;
+        if len(shape)&gt;1:
+            points=[(r[1],r[2]) for r in shape];cum=[0.]
+            for a,b in zip(points,points[1:]):cum.append(cum[-1]+hav(a,b))
+            # Project stops onto polyline segments in a local metric plane.
+            scale=111195;cos=math.cos(math.radians(coords[0][0]));positions=[];errors=[];last=0.
+            for la,lo in coords:
+                best=None
+                for j,(a,b) in enumerate(zip(points,points[1:])):
+                    ax=(a[1]-lo)*scale*cos;ay=(a[0]-la)*scale;dx=(b[1]-a[1])*scale*cos;dy=(b[0]-a[0])*scale
+                    den=dx*dx+dy*dy;u=max(0,min(1,-(ax*dx+ay*dy)/den)) if den else 0
+                    pos=cum[j]+u*(cum[j+1]-cum[j])
+                    if pos+2&lt;last:continue
+                    error=math.hypot(ax+u*dx,ay+u*dy)
+                    if best is None or error&lt;best[0]:best=(error,pos)
+                if best is None:errors.append(1e9);positions.append(last)
+                else:errors.append(best[0]);positions.append(max(last,best[1]));last=positions[-1]
+            if max(errors)&lt;400 and all(positions[i]-positions[i-1]&gt;=hav(coords[i-1],coords[i])*.85 for i in range(1,len(seq))):
+                cumulative=positions;method=&#x27;projection monotone sur shapes GTFS&#x27;
+        if cumulative is None:
+            cumulative=[0.]
+            for a,b in zip(coords,coords[1:]):cumulative.append(cumulative[-1]+hav(a,b)*1.2)
+        self.distance_quality[method]+=1;self._distances[key]=(cumulative,method)
+        return cumulative,method
+
+    def solve(self,origin,day,start=&#x27;08:00&#x27;,max_walk=30,max_changes=2,extra=10,profile=&#x27;standard&#x27;,bus_electric=False):
+        started=time.perf_counter();departure=seconds(start if start.count(&#x27;:&#x27;)==2 else start+&#x27;:00&#x27;)
+        # All searches are bounded to three hours and at most max_changes + 1 rides.
+        departures=self.day(day);walk_limit=int(float(max_walk)*60);max_boards=int(max_changes)+1
+        if not departures:raise ValueError(&#x27;Aucun service actif dans ce périmètre pour cette date.&#x27;)
+        if profile==&#x27;strict&#x27;:
+            return {&#x27;options&#x27;:[],&#x27;pareto&#x27;:[],&#x27;message&#x27;:&#x27;Aucun trajet certifiable de bout en bout : accès piétons et entrée IBGBI non audités PMR. Les données inconnues ne valent pas une garantie.&#x27;,&#x27;latency_ms&#x27;:round((time.perf_counter()-started)*1000,2),&#x27;stats&#x27;:{&#x27;labels&#x27;:0},&#x27;origin&#x27;:origin,&#x27;date&#x27;:day,&#x27;start&#x27;:start}
+
+        def search(deadline,pareto):
+            labels=defaultdict(list);queue=[];counter=0;solutions=[];best=deadline;created=0
+            def push(l):
+                nonlocal counter,created
+                if l.t&gt;best or l.walk&gt;walk_limit or l.boards&gt;max_boards:return
+                existing=labels[l.stop]
+                if pareto:
+                    if any(dominates(o,l) for o in existing if o.alive):return
+                    for o in existing:
+                        if o.alive and dominates(l,o):o.alive=False
+                else:
+                    # Keep walk/board trade-offs even in the reference search;
+                    # earliest time alone is not safe under resource constraints.
+                    if any(o.alive and o.t&lt;=l.t and o.ready&lt;=l.ready and o.walk&lt;=l.walk and o.boards&lt;=l.boards and o.pmr==l.pmr for o in existing):return
+                    for o in existing:
+                        if o.alive and l.t&lt;=o.t and l.ready&lt;=o.ready and l.walk&lt;=o.walk and l.boards&lt;=o.boards and l.pmr==o.pmr:o.alive=False
+                existing.append(l);counter+=1;created+=1;heapq.heappush(queue,(l.t,counter,l))
+            origin_coord=(origin[&#x27;lat&#x27;],origin[&#x27;lon&#x27;])
+            # Direct walk is a legitimate alternative, with declared distance model.
+            direct=math.ceil(hav(origin_coord,self.campus)*1.25/1.25)
+            if direct&lt;=walk_limit:
+                solutions.append(Label(&#x27;@campus&#x27;,departure+direct,departure+direct,0,direct,0,0,({&#x27;kind&#x27;:&#x27;walk&#x27;,&#x27;from_name&#x27;:origin[&#x27;name&#x27;],&#x27;to_name&#x27;:&#x27;IBGBI&#x27;,&#x27;from_coord&#x27;:origin_coord,&#x27;to_coord&#x27;:self.campus,&#x27;departure&#x27;:departure,&#x27;arrival&#x27;:departure+direct,&#x27;walk_s&#x27;:direct,&#x27;distance_m&#x27;:direct*1.25,&#x27;method&#x27;:&#x27;distance géodésique × 1,25&#x27;},)))
+                if not pareto:best=min(best,departure+direct)
+            for sid in self.used:
+                distance=hav(origin_coord,self.coords[sid])
+                if distance&gt;700:continue
+                walk=math.ceil(distance*1.25/1.25)
+                status=self.pmr_stop(sid)
+                if profile==&#x27;avoid&#x27; and status==2:continue
+                segment={&#x27;kind&#x27;:&#x27;walk&#x27;,&#x27;from_name&#x27;:origin[&#x27;name&#x27;],&#x27;to_name&#x27;:self.stops[sid][&#x27;stop_name&#x27;],&#x27;from_coord&#x27;:origin_coord,&#x27;to_coord&#x27;:self.coords[sid],&#x27;departure&#x27;:departure,&#x27;arrival&#x27;:departure+walk,&#x27;walk_s&#x27;:walk,&#x27;distance_m&#x27;:walk*1.25,&#x27;method&#x27;:&#x27;distance géodésique × 1,25&#x27;}
+                push(Label(sid,departure+walk,departure+walk,0,walk,0,2 if status==2 else 0,(segment,)))
+            while queue:
+                _,_,l=heapq.heappop(queue)
+                if not l.alive or l.t&gt;best:continue
+                if l.stop in self.egress:
+                    walk=self.egress[l.stop];arrival=l.t+walk
+                    if l.walk+walk&lt;=walk_limit and arrival&lt;=best:
+                        seg={&#x27;kind&#x27;:&#x27;walk&#x27;,&#x27;from_name&#x27;:self.stops[l.stop][&#x27;stop_name&#x27;],&#x27;to_name&#x27;:&#x27;IBGBI&#x27;,&#x27;from_coord&#x27;:self.coords[l.stop],&#x27;to_coord&#x27;:self.campus,&#x27;departure&#x27;:l.t,&#x27;arrival&#x27;:arrival,&#x27;walk_s&#x27;:walk,&#x27;distance_m&#x27;:walk*1.25,&#x27;method&#x27;:&#x27;distance géodésique × 1,25 ; entrée non auditée PMR&#x27;}
+                        solutions.append(Label(&#x27;@campus&#x27;,arrival,arrival,l.g,l.walk+walk,l.boards,l.pmr,l.path+(seg,)))
+                        if not pareto:best=arrival
+                for target,duration,walk,method in self.transfers.get(l.stop,[]):
+                    if l.t+duration&gt;best:continue
+                    status=self.pmr_stop(target);pmr=2 if 2 in (status,l.pmr) else 0
+                    if profile==&#x27;avoid&#x27; and pmr==2:continue
+                    seg={&#x27;kind&#x27;:&#x27;walk&#x27;,&#x27;from_name&#x27;:self.stops[l.stop][&#x27;stop_name&#x27;],&#x27;to_name&#x27;:self.stops[target][&#x27;stop_name&#x27;],&#x27;from_coord&#x27;:self.coords[l.stop],&#x27;to_coord&#x27;:self.coords[target],&#x27;departure&#x27;:l.t,&#x27;arrival&#x27;:l.t+duration,&#x27;walk_s&#x27;:walk,&#x27;distance_m&#x27;:walk*1.25,&#x27;method&#x27;:method}
+                    push(Label(target,l.t+duration,l.t+duration,l.g,l.walk+walk,l.boards,pmr,l.path+(seg,)))
+                if l.boards&gt;=max_boards:continue
+                # A self-stop GTFS prohibition forbids changing vehicles here.
+                # Staying on the same vehicle is already expanded in one ride.
+                if l.path and l.path[-1][&#x27;kind&#x27;]==&#x27;transit&#x27; and (l.stop,l.stop) in self.forbidden:continue
+                events=departures.get(l.stop,[])
+                begin=bisect.bisect_left(events,(l.ready,))
+                for dep,tid,i,offset in events[begin:]:
+                    if dep&gt;best:break
+                    trip=self.trips[tid];route=self.routes[trip[&#x27;route_id&#x27;]];seq=self.calls[tid]
+                    vehicle=int(trip.get(&#x27;wheelchair_accessible&#x27;) or 0)
+                    status=2 if 2 in (l.pmr,vehicle,self.pmr_stop(l.stop)) else 0
+                    if profile==&#x27;avoid&#x27; and status==2:continue
+                    cumulative,method=self.distances(tid)
+                    factor=self.data[&#x27;factors&#x27;][route[&#x27;route_type&#x27;]][&#x27;g_per_pkm&#x27;]
+                    if bus_electric and route[&#x27;route_type&#x27;]==&#x27;3&#x27;:factor=self.data[&#x27;factor_source&#x27;][&#x27;electric_bus_g_per_pkm&#x27;]
+                    for j in range(i+1,len(seq)):
+                        sid,arr,_,_,dropoff=seq[j];arr+=offset
+                        if arr&gt;best:break
+                        if not dropoff:continue
+                        pmr=2 if 2 in (status,self.pmr_stop(sid)) else 0
+                        if profile==&#x27;avoid&#x27; and pmr==2:continue
+                        distance=max(0,cumulative[j]-cumulative[i]);g=distance/1000*factor
+                        seg={&#x27;kind&#x27;:&#x27;transit&#x27;,&#x27;route&#x27;:route[&#x27;route_short_name&#x27;],&#x27;route_type&#x27;:int(route[&#x27;route_type&#x27;]),&#x27;color&#x27;:&#x27;#&#x27;+(route.get(&#x27;route_color&#x27;) or &#x27;147C68&#x27;),&#x27;trip_id&#x27;:tid,&#x27;from_stop&#x27;:l.stop,&#x27;to_stop&#x27;:sid,&#x27;from_name&#x27;:self.stops[l.stop][&#x27;stop_name&#x27;],&#x27;to_name&#x27;:self.stops[sid][&#x27;stop_name&#x27;],&#x27;from_coord&#x27;:self.coords[l.stop],&#x27;to_coord&#x27;:self.coords[sid],&#x27;departure&#x27;:dep,&#x27;arrival&#x27;:arr,&#x27;distance_m&#x27;:round(distance,1),&#x27;emissions_g&#x27;:round(g,4),&#x27;factor_g_per_pkm&#x27;:factor,&#x27;method&#x27;:method,&#x27;vehicle_accessibility&#x27;:vehicle,&#x27;via&#x27;:[self.coords[c[0]] for c in seq[i:j+1]]}
+                        selfrule=self.raw_transfer.get((sid,sid),{})
+                        buffer=max(120,int(selfrule.get(&#x27;min_transfer_time&#x27;) or 0))
+                        push(Label(sid,arr,arr+buffer,l.g+g,l.walk,l.boards+1,pmr,l.path+(seg,)))
+            return solutions,created
+
+        fast,refcount=search(departure+3*3600,False)
+        if not fast:return {&#x27;options&#x27;:[],&#x27;pareto&#x27;:[],&#x27;message&#x27;:&#x27;Aucun trajet dans les limites choisies (périmètre, 3 h, marche, changements).&#x27;,&#x27;latency_ms&#x27;:round((time.perf_counter()-started)*1000,2),&#x27;stats&#x27;:{&#x27;labels&#x27;:refcount},&#x27;origin&#x27;:origin,&#x27;date&#x27;:day,&#x27;start&#x27;:start}
+        reference=min(fast,key=lambda l:(l.t,l.g,l.walk,l.boards))
+        candidates,count=search(reference.t+int(float(extra)*60),True)
+        candidates.append(reference)
+        frontier=[]
+        for l in sorted(candidates,key=lambda l:(l.t,l.g,l.walk,l.boards)):
+            if any(o.t&lt;=l.t and o.g&lt;=l.g+1e-7 and o.walk&lt;=l.walk and o.boards&lt;=l.boards and o.pmr==l.pmr for o in frontier):continue
+            frontier=[o for o in frontier if not(l.t&lt;=o.t and l.g&lt;=o.g+1e-7 and l.walk&lt;=o.walk and l.boards&lt;=o.boards and l.pmr==o.pmr)];frontier.append(l)
+        sober=min(frontier,key=lambda l:(l.g,l.t,l.walk,l.boards))
+        simple=min(frontier,key=lambda l:(l.boards,l.t,l.g,l.walk))
+        def serial(l,role):
+            return {&#x27;role&#x27;:role,&#x27;duration_min&#x27;:round((l.t-departure)/60,2),&#x27;arrival&#x27;:clock(l.t),&#x27;emissions_g&#x27;:round(l.g,3),&#x27;walk_min&#x27;:round(l.walk/60,2),&#x27;changes&#x27;:max(0,l.boards-1),&#x27;accessibility&#x27;:&#x27;incompatible renseignée&#x27; if l.pmr==2 else &#x27;inconnue de bout en bout&#x27;,&#x27;segments&#x27;:list(l.path),&#x27;extra_min&#x27;:round((l.t-reference.t)/60,2),&#x27;gain_pct&#x27;:round((reference.g-l.g)/reference.g*100,2) if reference.g&gt;0 else None}
+        return {&#x27;options&#x27;:[serial(reference,&#x27;Rapide&#x27;),serial(sober,&#x27;Sobre&#x27;),serial(simple,&#x27;Peu de changements&#x27;)],
+                &#x27;pareto&#x27;:[serial(l,&#x27;Compromis&#x27;) for l in frontier],
+                &#x27;message&#x27;:&#x27;Horaires prévus. Marche estimée ; PMR non certifiée. Optimalité dans le modèle et le périmètre documentés.&#x27;,
+                &#x27;latency_ms&#x27;:round((time.perf_counter()-started)*1000,2),&#x27;stats&#x27;:{&#x27;labels&#x27;:refcount+count,&#x27;frontier&#x27;:len(frontier)},&#x27;origin&#x27;:origin,&#x27;date&#x27;:day,&#x27;start&#x27;:start}
+
+    def metadata(self):
+        starts=[r[&#x27;start_date&#x27;] for r in self.data[&#x27;calendar&#x27;]];ends=[r[&#x27;end_date&#x27;] for r in self.data[&#x27;calendar&#x27;]]
+        return {&#x27;campus&#x27;:self.data[&#x27;campus&#x27;],&#x27;origins&#x27;:self.data[&#x27;origins&#x27;],&#x27;routes&#x27;:len(self.routes),&#x27;stops&#x27;:len(self.used),&#x27;trips&#x27;:len(self.calls),&#x27;min_date&#x27;:date.fromisoformat(min(starts)).isoformat(),&#x27;max_date&#x27;:date.fromisoformat(max(ends)).isoformat(),&#x27;provenance&#x27;:self.data[&#x27;provenance&#x27;],&#x27;factors&#x27;:self.data[&#x27;factors&#x27;],&#x27;factor_source&#x27;:self.data[&#x27;factor_source&#x27;]}
+</code></pre></main></body></html>

@@ -1,0 +1,106 @@
+{
+  "distance_convention_km": 22.5,
+  "source_distance": "Moyenne publiée, enquête Université d’Évry 2022, tous modes. Réutilisée uniquement pour standardiser la comparaison.",
+  "scenarios": [
+    {
+      "mode": "Voiture solo",
+      "distance_km": 22.5,
+      "occupants": 1,
+      "kg_co2e": 3.2007017751647253,
+      "api_id": 4
+    },
+    {
+      "mode": "Covoiturage à deux",
+      "distance_km": 24.750000000000004,
+      "occupants": 2,
+      "kg_co2e": 1.7603859763405993,
+      "api_id": 22
+    },
+    {
+      "mode": "Bus thermique",
+      "distance_km": 22.5,
+      "occupants": "facteur moyen",
+      "kg_co2e": 2.75445,
+      "api_id": 9
+    },
+    {
+      "mode": "RER / Transilien",
+      "distance_km": 22.5,
+      "occupants": "facteur moyen",
+      "kg_co2e": 0.22005000000000002,
+      "api_id": 14
+    }
+  ],
+  "carpool_gain_pct": 44.999999999999986,
+  "carpool_detour_pct": 10,
+  "weekly": {
+    "days": 5,
+    "round_trips_per_day": 1,
+    "solo_kg": 32.007017751647254,
+    "mixed_kg": 26.245754556350747,
+    "mixed_carpool_days": 2,
+    "gain_pct": 18
+  },
+  "cost_scenario": {
+    "consumption_l_per_100km": 6.0,
+    "fuel_euro_per_litre_assumed": 2.0,
+    "solo_euro_one_way": 2.7,
+    "carpool_euro_per_person_one_way": 1.485,
+    "scope": "Carburant seulement ; ni prix constaté, ni coût total. Assurance, entretien, amortissement, péage et parking non inclus."
+  },
+  "survey": {
+    "year": 2022,
+    "respondents": 561,
+    "participation_pct": 5,
+    "mean_distance_km": 22.5,
+    "mean_time_min": 51.2,
+    "modal_share_pct": {
+      "Train / RER": 40,
+      "Bus": 32,
+      "Voiture": 21,
+      "Marche": 6,
+      "Vélo / VAE": 1,
+      "Covoiturage": 1
+    },
+    "scope": "Université d’Évry, pas uniquement IBGBI ; dénominateurs variables ; arrondis ; enquête volontaire historique."
+  },
+  "parking": {
+    "integrated": true,
+    "source": "Information déclarée par le groupe",
+    "price": "non renseigné"
+  },
+  "ranges": {
+    "carpool_reduction_pct": [
+      40.0,
+      66.66666666666667
+    ],
+    "carpool_conditions": "2 à 3 occupants, détour de 0 à 20 %, trajets solo remplacés ; même facteur véhicule.",
+    "private_bike_or_ebike_avoided_kg_per_trip": [
+      0.2626068244590867,
+      0.7104170611477167
+    ],
+    "bike_conditions": "Vélo/VAE personnel remplaçant une voiture sur 2 à 5 km ; facteurs et périmètre figés. Ne vaut pas pour un vélo partagé.",
+    "bus_segment_2km_g": 244.84,
+    "shared_bike_conditions": "Le gain net du Vélib nécessite sa distance réelle et son facteur propre, incluant notamment la logistique. La distance de quatre arrêts n’est pas connue."
+  },
+  "personal_cases": {
+    "car_driver": {
+      "names": "Abdallah et Adem",
+      "duration_car_declared_min": 45,
+      "duration_rer_declared_min": 90,
+      "source": "Durées indicatives déclarées par le groupe, sans vérification GTFS de leurs origines."
+    },
+    "multimodal_student": {
+      "names": "Mafaly et Adlane",
+      "chain": "Marche + bus + RER D + marche",
+      "bus_stops_declared": 4,
+      "velib_city": "Service disponible dans la ville de départ selon le groupe ; commune non fournie."
+    }
+  },
+  "limitations": [
+    "Ne pas multiplier une distance moyenne tous modes par une part de personnes pour inventer une empreinte totale du campus.",
+    "Les facteurs sont moyens, pas marginaux. Le bus est un scénario thermique générique.",
+    "Le gain de covoiturage suppose un trajet partagé et des trajets de référence réellement remplacés.",
+    "Aucune durée, météo, économie personnelle ou adoption étudiante n’est fabriquée."
+  ]
+}
